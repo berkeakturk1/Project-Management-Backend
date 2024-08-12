@@ -212,10 +212,15 @@ app.post('/login', async (req, res) => {
 });
 
 
+const getUserIdsFromUsernames = async (usernames) => {
+  const query = 'SELECT id FROM users WHERE username = ANY($1::text[])';
+  const result = await client.query(query, [usernames]);
+  return result.rows.map(row => row.id);
+};
 
 // API endpoint to create a new note
 app.post('/api', async (req, res) => {
-  const { title, content, status, importance, taskboardId } = req.body;
+  const { title, content, status, importance, taskboardId, assignedTo } = req.body;
 
   if (!taskboardId) {
     return res.status(400).send('Taskboard ID is required');
@@ -230,16 +235,38 @@ app.post('/api', async (req, res) => {
   };
 
   try {
+    // Insert the new note into the tasks table and get the created task ID
     const result = await client.query(
       'INSERT INTO tasks (task_title, task_content, status, importance, taskboard_id) VALUES ($1, $2, $3, $4, $5) RETURNING *',
       [newNote.title, newNote.content, newNote.status, newNote.importance, newNote.taskboardId]
     );
-    res.json(result.rows[0]);
+
+    // Ensure the correct column name is used for task ID
+    const createdTask = result.rows[0];
+    const taskId = createdTask.m_id; // Use the correct column name for the task ID
+
+    // Convert assignedTo (usernames) to user IDs
+    const userIds = await getUserIdsFromUsernames(assignedTo);
+
+    // Check if there are users to assign to this task
+    if (userIds && Array.isArray(userIds) && userIds.length > 0) {
+      const assignmentQueries = userIds.map(userId =>
+        client.query(
+          'INSERT INTO user_tasks (user_id, task_id) VALUES ($1, $2)',
+          [userId, taskId]
+        )
+      );
+      await Promise.all(assignmentQueries);
+    }
+
+    res.json(createdTask);
   } catch (error) {
     console.error('Error creating note:', error);
     res.status(500).send('Server error');
   }
 });
+
+
 
 
 
@@ -378,20 +405,62 @@ app.get('/api/tasks', authenticateToken, async (req, res) => {
 
 
 
-
 // API endpoint to update a task title and description
-app.put('/api/:id', async (req, res) => {
+// API endpoint to update a task title and description
+app.put('/api/update/:id', async (req, res) => {
   const { id } = req.params;
-  const { title, content, status } = req.body;
+  const { title, content, status, importance, assignedTo } = req.body;
+
+  console.log("Received update request for ID:", id);
+  console.log("Update payload:", { title, content, status, importance, assignedTo });
 
   try {
-    const result = await client.query('UPDATE tasks SET task_title = $1, task_content = $2, status = $3 WHERE m_id = $4 RETURNING *', [title, content, status, id]);
-    res.json(result.rows[0]);
+    const result = await client.query(
+      'UPDATE tasks SET task_title = $1, task_content = $2, status = $3, importance = $4 WHERE m_id = $5 RETURNING *',
+      [title, content, status, importance, id]
+    );
+
+    if (result.rowCount === 0) {
+      console.log("No note found for ID:", id);
+      return res.status(404).json({ error: 'Note not found' });
+    }
+
+    const updatedTask = result.rows[0];
+    console.log("Updated task:", updatedTask);
+
+    // Convert assignedTo (usernames) to user IDs
+    const userIds = await getUserIdsFromUsernames(assignedTo);
+
+    // Update assigned users if necessary
+    if (userIds && Array.isArray(userIds)) {
+      console.log("Updating assigned users for task ID:", id);
+
+      // First, clear existing assignments for this task
+      await client.query('DELETE FROM user_tasks WHERE task_id = $1', [id]);
+      console.log("Cleared existing user assignments for task ID:", id);
+
+      // Then, add the new assignments
+      const assignmentQueries = userIds.map(userId =>
+        client.query(
+          'INSERT INTO user_tasks (user_id, task_id) VALUES ($1, $2)',
+          [userId, id]
+        )
+      );
+      await Promise.all(assignmentQueries);
+      console.log("Added new user assignments for task ID:", id);
+    }
+
+    // Logging the final response before sending it
+    console.log("Final response being sent for task ID:", id, ":", updatedTask);
+
+    res.json(updatedTask);
   } catch (error) {
     console.error('Error updating note:', error);
     res.status(500).send('Server error');
   }
 });
+
+
 
 app.listen(port, () => {
   console.log(`Server is running on http://localhost:${port}`);
