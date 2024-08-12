@@ -390,18 +390,31 @@ app.get('/api/tasks', authenticateToken, async (req, res) => {
       return res.status(403).json({ error: 'Access denied' });
     }
 
-    // Fetch tasks if access is granted
-    const tasksResult = await client.query(
-      'SELECT * FROM tasks WHERE taskboard_id = $1',
-      [taskboardId]
-    );
+    // Fetch tasks with assigned users' usernames
+    const tasksQuery = `
+      SELECT 
+        t.m_id, 
+        t.task_title, 
+        t.task_content, 
+        t.status, 
+        t.importance,
+        ARRAY_AGG(u.username) AS assigned_users
+      FROM tasks t
+      LEFT JOIN user_tasks ut ON t.m_id = ut.task_id
+      LEFT JOIN users u ON ut.user_id = u.id
+      WHERE t.taskboard_id = $1
+      GROUP BY t.m_id
+      ORDER BY t.m_id;
+    `;
+    const tasksResult = await client.query(tasksQuery, [taskboardId]);
 
     res.json(tasksResult.rows);
   } catch (err) {
-    console.error('Error fetching tasks:', err);
+    console.error('Error fetching tasks with usernames:', err);
     res.status(500).json({ error: 'Internal server error' });
   }
 });
+
 
 
 
