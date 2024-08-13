@@ -131,8 +131,8 @@ app.get('/api/taskboards', async (req, res) => {
       [userId]
     );
 
-    console.log(`Query successful, rows returned: ${result.rows.length}`);
-    console.log('Result data:', result.rows);
+    //console.log(`Query successful, rows returned: ${result.rows.length}`);
+    //console.log('Result data:', result.rows);
 
     res.json(result.rows);
   } catch (error) {
@@ -529,3 +529,37 @@ app.get('/api/workspaces', async (req, res) => {
   const workspaces = await fetchWorkspaces(userId, userType);
   res.json(workspaces);
 });
+app.get('/api/user-tasks', authenticateToken, async (req, res) => {
+  try {
+    const userId = req.user.userId;
+
+    const tasksQuery = `
+      SELECT t.*, u.id as assignee_id, tb.title as taskboard
+      FROM tasks t
+      JOIN user_tasks ut ON ut.task_id = t.m_id
+      JOIN users u ON u.id = ut.user_id
+      JOIN taskboards tb ON tb.id = t.taskboard_id
+      WHERE ut.user_id = $1;
+    `;
+    const result = await client.query(tasksQuery, [userId]);
+
+    // Reshape the result if needed, e.g., grouping assignees together
+    const tasks = result.rows.map(row => ({
+      id: row.m_id,
+      task_title: row.task_title,
+      taskboard: row.taskboard,
+      status: row.status === "todo" ? "To Do" : row.status === "inProgress" ? "In Progress" : row.status === "codeReview" ? "Code Review" : "Done",
+      dueDate: row.due_date,  // Adjust field names based on your database
+      dueTime: row.due_time,  // Adjust field names based on your database
+      isLate: row.due_date < new Date(),  // Simple check for lateness
+      flaggedForReview: row.flagged_for_review || false,
+    }));
+
+    res.json(tasks);
+  } catch (error) {
+    console.error("Error fetching user's tasks:", error);
+    res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+
