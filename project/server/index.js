@@ -550,7 +550,7 @@ app.get('/api/user-tasks', authenticateToken, async (req, res) => {
 
 app.put('/api/flag-task/:taskId', authenticateToken, async (req, res) => {
   const { taskId } = req.params;
-  const { status } = "inProgress";
+  const  status  = 'codeReview';
 
   try {
     await client.query(
