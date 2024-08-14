@@ -49,7 +49,7 @@ const authenticateToken = (req, res, next) => {
       return res.sendStatus(403); // Forbidden
     }
     req.user = user;
-    console.log('Token verified, user:', user);
+
     next(); // Proceed
   });
 };
@@ -220,7 +220,7 @@ const getUserIdsFromUsernames = async (usernames) => {
 
 // API endpoint to create a new note
 app.post('/api', async (req, res) => {
-  const { title, content, status, importance, taskboardId, assignedTo } = req.body;
+  const { title, content, status, importance, dueDate, dueTime, taskboardId, assignedTo } = req.body;
 
   if (!taskboardId) {
     return res.status(400).send('Taskboard ID is required');
@@ -231,30 +231,28 @@ app.post('/api', async (req, res) => {
     content,
     status: status || 'todo',
     importance: importance || 'No time Constraint',
+    dueDate: dueDate || null,  // Handle optional due date
+    dueTime: dueTime || null,  // Handle optional due time
     taskboardId
   };
 
   try {
-    // Insert the new note into the tasks table and get the created task ID
     const result = await client.query(
-      'INSERT INTO tasks (task_title, task_content, status, importance, taskboard_id) VALUES ($1, $2, $3, $4, $5) RETURNING *',
-      [newNote.title, newNote.content, newNote.status, newNote.importance, newNote.taskboardId]
+        'INSERT INTO tasks (task_title, task_content, status, importance, due_date, due_time, taskboard_id) VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING *',
+        [newNote.title, newNote.content, newNote.status, newNote.importance, newNote.dueDate, newNote.dueTime, newNote.taskboardId]
     );
 
-    // Ensure the correct column name is used for task ID
     const createdTask = result.rows[0];
-    const taskId = createdTask.m_id; // Use the correct column name for the task ID
+    const taskId = createdTask.m_id;
 
-    // Convert assignedTo (usernames) to user IDs
+    // Convert assignedTo (usernames) to user IDs and assign users to the task (similar to your existing logic)
     const userIds = await getUserIdsFromUsernames(assignedTo);
-
-    // Check if there are users to assign to this task
-    if (userIds && Array.isArray(userIds) && userIds.length > 0) {
+    if (userIds.length > 0) {
       const assignmentQueries = userIds.map(userId =>
-        client.query(
-          'INSERT INTO user_tasks (user_id, task_id) VALUES ($1, $2)',
-          [userId, taskId]
-        )
+          client.query(
+              'INSERT INTO user_tasks (user_id, task_id) VALUES ($1, $2)',
+              [userId, taskId]
+          )
       );
       await Promise.all(assignmentQueries);
     }
@@ -265,6 +263,7 @@ app.post('/api', async (req, res) => {
     res.status(500).send('Server error');
   }
 });
+
 
 
 
@@ -398,6 +397,8 @@ app.get('/api/tasks', authenticateToken, async (req, res) => {
         t.task_content, 
         t.status, 
         t.importance,
+        t.due_date,
+        t.due_time,
         ARRAY_AGG(u.username) AS assigned_users
       FROM tasks t
       LEFT JOIN user_tasks ut ON t.m_id = ut.task_id
@@ -419,52 +420,34 @@ app.get('/api/tasks', authenticateToken, async (req, res) => {
 
 
 // API endpoint to update a task title and description
-// API endpoint to update a task title and description
 app.put('/api/update/:id', async (req, res) => {
   const { id } = req.params;
-  const { title, content, status, importance, assignedTo } = req.body;
-
-  console.log("Received update request for ID:", id);
-  console.log("Update payload:", { title, content, status, importance, assignedTo });
+  const { title, content, status, importance, dueDate, dueTime, assignedTo } = req.body;
 
   try {
     const result = await client.query(
-      'UPDATE tasks SET task_title = $1, task_content = $2, status = $3, importance = $4 WHERE m_id = $5 RETURNING *',
-      [title, content, status, importance, id]
+        'UPDATE tasks SET task_title = $1, task_content = $2, status = $3, importance = $4, due_date = $5, due_time = $6 WHERE m_id = $7 RETURNING *',
+        [title, content, status, importance, dueDate || null, dueTime || null, id]
     );
 
     if (result.rowCount === 0) {
-      console.log("No note found for ID:", id);
       return res.status(404).json({ error: 'Note not found' });
     }
 
     const updatedTask = result.rows[0];
-    console.log("Updated task:", updatedTask);
 
-    // Convert assignedTo (usernames) to user IDs
+    // Update assigned users if necessary (similar to your existing logic)
     const userIds = await getUserIdsFromUsernames(assignedTo);
-
-    // Update assigned users if necessary
-    if (userIds && Array.isArray(userIds)) {
-      console.log("Updating assigned users for task ID:", id);
-
-      // First, clear existing assignments for this task
+    if (userIds.length > 0) {
       await client.query('DELETE FROM user_tasks WHERE task_id = $1', [id]);
-      console.log("Cleared existing user assignments for task ID:", id);
-
-      // Then, add the new assignments
       const assignmentQueries = userIds.map(userId =>
-        client.query(
-          'INSERT INTO user_tasks (user_id, task_id) VALUES ($1, $2)',
-          [userId, id]
-        )
+          client.query(
+              'INSERT INTO user_tasks (user_id, task_id) VALUES ($1, $2)',
+              [userId, id]
+          )
       );
       await Promise.all(assignmentQueries);
-      console.log("Added new user assignments for task ID:", id);
     }
-
-    // Logging the final response before sending it
-    console.log("Final response being sent for task ID:", id, ":", updatedTask);
 
     res.json(updatedTask);
   } catch (error) {
@@ -472,6 +455,8 @@ app.put('/api/update/:id', async (req, res) => {
     res.status(500).send('Server error');
   }
 });
+
+
 
 
 
@@ -498,20 +483,21 @@ const fetchWorkspaces = async (userId, userType) => {
   try {
     const query = `
       SELECT 
-        tb.id AS taskboard_id,
-        tb.title AS name,
-        tb.description AS description,
-        tb.created_at AS start,
-        tb.created_at AS end,
-        SUM(CASE WHEN t.status = 'done' THEN 1 ELSE 0 END) AS completed,
-        SUM(CASE WHEN t.status IN ('inProgress', 'codeReview', 'todo') THEN 1 ELSE 0 END) AS remaining,
-        SUM(CASE WHEN t.status = 'todo' THEN 1 ELSE 0 END) AS rejected,
-        SUM(CASE WHEN t.status = 'inProgress' THEN 1 ELSE 0 END) AS revising
-      FROM taskboards tb
-      LEFT JOIN tasks t ON t.taskboard_id = tb.id
-      JOIN workspaces w ON tb.workspace_id = w.id
-      WHERE w.user_id = $1
-      GROUP BY tb.id
+  tb.id AS taskboard_id,
+  tb.title AS name,
+  tb.description AS description,
+  tb.created_at AS start,
+  tb.created_at AS end,
+  COUNT(*) FILTER (WHERE t.status = 'done') AS completed,
+  COUNT(*) FILTER (WHERE t.status IN ('inProgress', 'codeReview', 'todo')) AS remaining,
+  COUNT(*) FILTER (WHERE t.status = 'todo') AS rejected,
+  COUNT(*) FILTER (WHERE t.status = 'inProgress') AS revising
+FROM taskboards tb
+JOIN workspaces w ON tb.workspace_id = w.id
+LEFT JOIN tasks t ON t.taskboard_id = tb.id
+WHERE w.user_id = $1
+GROUP BY tb.id
+
     `;
     const res = await client.query(query, [userId]);
     console.log('Workspaces:', res.rows);
@@ -529,6 +515,7 @@ app.get('/api/workspaces', async (req, res) => {
   const workspaces = await fetchWorkspaces(userId, userType);
   res.json(workspaces);
 });
+
 app.get('/api/user-tasks', authenticateToken, async (req, res) => {
   try {
     const userId = req.user.userId;
@@ -543,15 +530,14 @@ app.get('/api/user-tasks', authenticateToken, async (req, res) => {
     `;
     const result = await client.query(tasksQuery, [userId]);
 
-    // Reshape the result if needed, e.g., grouping assignees together
     const tasks = result.rows.map(row => ({
       id: row.m_id,
       task_title: row.task_title,
       taskboard: row.taskboard,
       status: row.status === "todo" ? "To Do" : row.status === "inProgress" ? "In Progress" : row.status === "codeReview" ? "Code Review" : "Done",
-      dueDate: row.due_date,  // Adjust field names based on your database
-      dueTime: row.due_time,  // Adjust field names based on your database
-      isLate: row.due_date < new Date(),  // Simple check for lateness
+      dueDate: row.due_date,  // Include due_date in response
+      dueTime: row.due_time,  // Include due_time in response
+      isLate: row.due_date && row.due_date < new Date(),  // Check if the task is late
       flaggedForReview: row.flagged_for_review || false,
     }));
 
@@ -561,5 +547,23 @@ app.get('/api/user-tasks', authenticateToken, async (req, res) => {
     res.status(500).json({ error: "Internal server error" });
   }
 });
+
+app.put('/api/flag-task/:taskId', authenticateToken, async (req, res) => {
+  const { taskId } = req.params;
+  const { status } = "inProgress";
+
+  try {
+    await client.query(
+        'UPDATE tasks SET status= $1 where tasks.m_id = $2',
+        [status, taskId]
+    );
+    res.status(200).send("Task updated successfully");
+  } catch (error) {
+    console.error("Error updating task:", error);
+    res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+
 
 
