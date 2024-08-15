@@ -564,6 +564,33 @@ app.put('/api/flag-task/:taskId', authenticateToken, async (req, res) => {
   }
 });
 
+app.get('/api/sprint/:taskboardID', async (req, res) => {
+  const { taskboardID } = req.params;
+    try {
+        const query = `
+        SELECT 
+            t.m_id,
+            t.task_title,
+            t.task_content,
+            t.status,
+            t.importance,
+            t.due_date,
+            t.due_time,
+            ARRAY_AGG(u.username) AS assigned_users
+        FROM tasks t
+        LEFT JOIN user_tasks ut ON t.m_id = ut.task_id
+        LEFT JOIN users u ON ut.user_id = u.id
+        WHERE t.taskboard_id = $1
+        GROUP BY t.m_id
+        ORDER BY t.m_id;
+        `;
+        const result = await client.query(query, [taskboardID]);
+        res.json(result.rows);
+    } catch (error) {
+        console.error("Error fetching sprint tasks:", error);
+        res.status(500).json({ error: "Internal server error" });
+    }
+});
 
 
 
